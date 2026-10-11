@@ -225,6 +225,23 @@ feedback = true                  # ask for a 1–4 rating after each prompt
 
 If a profile's default model isn't deployed, OpenCode's default model is left unchanged and you get a warning.
 
+## MCP servers
+
+OpenCode can give the model extra tools through MCP servers, for example [Context7](https://github.com/upstash/context7) for library docs. openbench doesn't set any up. Add them under `mcp` in `~/.config/opencode/opencode.json`, as described in [OpenCode's MCP docs](https://opencode.ai/docs/mcp-servers/):
+
+```json
+"mcp": {
+  "context7": { "type": "remote", "url": "https://mcp.context7.com/mcp" }
+}
+```
+
+`lab use` leaves this key alone. A profile can carry its own servers instead, under `[opencode.mcp.<server>]`. In that case `lab use` replaces the whole `mcp` block, and switching to a profile without one removes it.
+
+MCP servers change the measurements:
+
+- **Tokens:** every server's tool descriptions are sent with every request, so prompt tokens go up. The `tools` count in the server records goes up too. For runs you want to compare, use the same servers throughout.
+- **Traces:** an MCP call is stored like any other tool call, as `<server>_<tool>` with its input, output and start and end times. `lab show` prints it. The time the model waits for a call falls between requests, so it counts toward the prompt's total time but not toward server response times.
+
 ## What openbench changes on your machine
 
 - **`~/.config/opencode/opencode.json`:** adds the `lab` provider and the keys the active profile sets. Everything else in the file is left alone.
