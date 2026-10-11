@@ -1,0 +1,65 @@
+# What can be served. Each [models.<name>] entry is one deployment: weights + the hardware to run them on.
+# It becomes the Modal app `lab-<name>` and the OpenCode model `lab/<name>`.
+# Anything not set in an entry comes from [defaults]; `extends = "<other>"` copies another entry first.
+# Names containing a dot must be quoted: [models."qwen3.6-35b"].
+
+[defaults]
+backend          = "vllm"
+gpu              = "L40S"      # H100 is pinned to "H100!" (no silent H200 upgrade) unless allow_upgrade = true
+gpus             = 1           # GPUs per container; vLLM splits the model across them (tensor parallel)
+max_concurrent   = 4           # requests one container works on at once (Modal max_inputs = vLLM --max-num-seqs)
+min_containers   = 0           # 0 = scale to zero when idle
+max_containers   = 1
+scaledown_window = "20m"       # idle time before shutdown; Modal allows 2s..20m
+context          = 65536       # vLLM --max-model-len, and OpenCode's context limit
+output           = 16384       # OpenCode's output limit
+
+# Ministral 3 14B Instruct, full precision (BF16, no quantization).
+[models.ministral-14b]
+name        = "Ministral 3 14B Instruct (BF16)"
+source      = "mistralai/Ministral-3-14B-Instruct-2512-BF16"
+revision    = "3cea74c1ebaf5ce5f5a2553de470e2ceab825142"
+# The repo stores the same weights twice; vLLM's mistral format only needs consolidated.safetensors.
+exclude     = ["model-*.safetensors", "model.safetensors.index.json"]
+tool_parser = "mistral"
+extra_args  = [
+  "--tokenizer-mode", "mistral", "--config-format", "mistral", "--load-format", "mistral",
+  "--limit-mm-per-prompt", '{"image": 0}',   # text only: OpenCode sends no images
+]
+temperature = 0.05             # server default when the client sends none; Mistral recommends < 0.1
+
+# Devstral Small 2: Mistral's 24B coding-agent model (Apache 2.0). Mistral publishes it in FP8 only (no BF16
+# release), so this is the original checkpoint, not a quantization. ≈ 26 GB of weights: fits one L40S.
+[models.devstral-small-2]
+name        = "Devstral Small 2 24B (FP8)"
+source      = "mistralai/Devstral-Small-2-24B-Instruct-2512"
+revision    = "55c5b41e98c2dbd21b0c8afffc540dcfc9eb5128"
+# Same weights twice, as with Ministral: keep the consolidated (Mistral-format) copy.
+exclude     = ["model-*.safetensors", "model.safetensors.index.json"]
+tool_parser = "mistral"
+extra_args  = [
+  "--tokenizer-mode", "mistral", "--config-format", "mistral", "--load-format", "mistral",
+  "--limit-mm-per-prompt", '{"image": 0}',
+]
+temperature = 0.15             # Mistral's recommendation
+
+# Mistral Medium 3.5: 128B dense, Mistral's strongest open coding model (Modified MIT license: free unless your
+# company has very large revenue). Published in FP8 only. ≈ 134 GB of weights on one B200 (180 GB) leaves room
+# for ≈ 65–90k tokens of conversation memory in total, so vLLM gets 95% of the GPU instead of its default 90%.
+[models."mistral-medium-3.5"]
+name        = "Mistral Medium 3.5 128B (FP8)"
+source      = "mistralai/Mistral-Medium-3.5-128B"
+revision    = "22b2b868a15677cfa6061277ed2f653d1349a9ab"
+gpu         = "B200"
+exclude     = ["model-*.safetensors", "model.safetensors.index.json", "images/*"]
+tool_parser = "mistral"
+extra_args  = [
+  "--tokenizer-mode", "mistral", "--config-format", "mistral", "--load-format", "mistral",
+  "--limit-mm-per-prompt", '{"image": 0}',
+  "--reasoning-parser", "mistral",   # thinking comes back separately from the answer
+  "--gpu-memory-utilization", "0.95",
+]
+# Thinking on, as Mistral recommends for agentic coding, with its sampling for that mode.
+reasoning_effort = "high"
+temperature      = 0.7
+top_p            = 0.95

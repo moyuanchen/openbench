@@ -1,0 +1,6 @@
+.secrets/
+.lab/
+metrics/
+ref/
+.venv/
+__pycache__/

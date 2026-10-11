@@ -1,0 +1,9 @@
+# OpenCode profile "mistral". `lab use mistral` writes it to build/opencode.json and into
+# ~/.config/opencode/opencode.json (only the `lab` provider and the keys set here).
+
+model    = "lab/mistral-medium-3.5"      # OpenCode's default model (models.toml: mistral-medium-3.5)
+# models = ["mistral-medium-3.5"]        # which models.toml entries OpenCode lists; omit = every deployed one
+feedback = true                          # ask for a 1–4 rating after each prompt; `/feedback` in OpenCode toggles it per window
+
+# [opencode]                             # copied as-is into the OpenCode config, for any other OpenCode setting
+# small_model = "lab/mistral-medium-3.5"

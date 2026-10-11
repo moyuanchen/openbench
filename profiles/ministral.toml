@@ -1,0 +1,9 @@
+# OpenCode profile "ministral". `lab use ministral` writes it to build/opencode.json and into
+# ~/.config/opencode/opencode.json (only the `lab` provider and the keys set here).
+
+model    = "lab/ministral-14b"           # OpenCode's default model (models.toml: ministral-14b)
+# models = ["ministral-14b"]             # which models.toml entries OpenCode lists; omit = every deployed one
+feedback = true                          # ask for a 1–4 rating after each prompt; `/feedback` in OpenCode toggles it per window
+
+# [opencode]                             # copied as-is into the OpenCode config, for any other OpenCode setting
+# small_model = "lab/ministral-14b"
