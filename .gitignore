@@ -4,3 +4,5 @@ metrics/
 ref/
 .venv/
 __pycache__/
+
+archive/
