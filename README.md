@@ -1,12 +1,12 @@
-# openbench
+# openrate
 
 Benchmark open-weight models by doing real work with them.
 
-openbench serves open-weight models on [Modal](https://modal.com) GPUs and connects them to [OpenCode](https://opencode.ai), the terminal coding agent. You code as usual. In the background, openbench records every token, every response time and your own rating of each answer, and links them all to the conversation they came from.
+openrate serves open-weight models on [Modal](https://modal.com) GPUs and connects them to [OpenCode](https://opencode.ai), the terminal coding agent. You code as usual. In the background, openrate records every token, every response time and your own rating of each answer, and links them all to the conversation they came from.
 
 ## Why
 
-Leaderboards score models on fixed tasks. openbench scores them on the work you actually do. Each prompt you send gets three kinds of measurement:
+Leaderboards score models on fixed tasks. openrate scores them on the work you actually do. Each prompt you send gets three kinds of measurement:
 
 - **Tokens:** prompt, cached and output tokens for every model request, including each step of an agent loop.
 - **Time:** time to first token, total time, tokens per second, and how many requests the GPU was handling at once.
@@ -42,7 +42,7 @@ You need macOS or Linux, `git`, and the three accounts and tools below. The CLI 
 
 ### 1. Create a Modal account
 
-Sign up at [modal.com](https://modal.com) with GitHub or Google. The free **Starter plan includes $30 of compute credit every month**, which is enough to try openbench properly. Credit that you don't use doesn't carry over. See [modal.com/pricing](https://modal.com/pricing) for current terms.
+Sign up at [modal.com](https://modal.com) with GitHub or Google. The free **Starter plan includes $30 of compute credit every month**, which is enough to try openrate properly. Credit that you don't use doesn't carry over. See [modal.com/pricing](https://modal.com/pricing) for current terms.
 
 Roughly what $30 buys (GPU prices from Modal on 2026-10-10, billed per second only while a container runs):
 
@@ -63,11 +63,11 @@ curl -fsSL https://opencode.ai/install | bash         # or: brew install anomaly
 
 Run `opencode` once to make sure it starts, then quit.
 
-### 3. Get openbench
+### 3. Get openrate
 
 ```sh
-git clone https://github.com/moyuanchen/openbench.git
-cd openbench
+git clone https://github.com/moyuanchen/openrate.git
+cd openrate
 uv sync                        # creates .venv with Python 3.12, Modal's client and the `lab` command
 source .venv/bin/activate      # puts `lab` and `modal` on your PATH (or prefix commands with `uv run`)
 ```
@@ -203,7 +203,7 @@ gpus    = 2                              # same weights, split across two GPUs
 
 ### Adding a model from Hugging Face
 
-1. **Find the model** on [huggingface.co](https://huggingface.co/models). Check that vLLM supports its architecture ([supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)) and that the model isn't gated. A gated model asks you to accept its terms before downloading, and openbench doesn't pass a Hugging Face token yet.
+1. **Find the model** on [huggingface.co](https://huggingface.co/models). Check that vLLM supports its architecture ([supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)) and that the model isn't gated. A gated model asks you to accept its terms before downloading, and openrate doesn't pass a Hugging Face token yet.
 2. **Copy the repo id** from the URL into `source`. To pin the exact weights, copy a commit hash from the repo's *Files and versions* → *History* page into `revision`.
 3. **Choose a GPU** with room for the weights plus the KV cache. *Files and versions* lists the file sizes.
 4. **Copy the serving flags from the model card.** Many model cards include a `vllm serve` command. OpenCode relies on tool calls, so its `--tool-call-parser` value goes into `tool_parser`. The other flags go into `extra_args`, and any recommended sampling settings go into `temperature`, `top_p` and so on.
@@ -227,7 +227,7 @@ If a profile's default model isn't deployed, OpenCode's default model is left un
 
 ## MCP servers
 
-OpenCode can give the model extra tools through MCP servers, for example [Context7](https://github.com/upstash/context7) for library docs. openbench doesn't set any up. Add them under `mcp` in `~/.config/opencode/opencode.json`, as described in [OpenCode's MCP docs](https://opencode.ai/docs/mcp-servers/):
+OpenCode can give the model extra tools through MCP servers, for example [Context7](https://github.com/upstash/context7) for library docs. openrate doesn't set any up. Add them under `mcp` in `~/.config/opencode/opencode.json`, as described in [OpenCode's MCP docs](https://opencode.ai/docs/mcp-servers/):
 
 ```json
 "mcp": {
@@ -242,14 +242,14 @@ MCP servers change the measurements:
 - **Tokens:** every server's tool descriptions are sent with every request, so prompt tokens go up. The `tools` count in the server records goes up too. For runs you want to compare, use the same servers throughout.
 - **Traces:** an MCP call is stored like any other tool call, as `<server>_<tool>` with its input, output and start and end times. `lab show` prints it. The time the model waits for a call falls between requests, so it counts toward the prompt's total time but not toward server response times.
 
-## What openbench changes on your machine
+## What openrate changes on your machine
 
 - **`~/.config/opencode/opencode.json`:** adds the `lab` provider and the keys the active profile sets. Everything else in the file is left alone.
 - **`~/.config/opencode/tui.json`:** adds the rating plugin (`plugins/feedback.ts`).
 - **Backups:** before every write, the previous version of each file is copied to `.lab/backups/`.
 - **Comments in your config:** if either file contains comments (JSONC), `lab` refuses to merge rather than risk losing them. Remove the comments or move them elsewhere.
 
-On Modal, openbench creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, and the secret `lab-api-key`. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, and remove the `lab` provider and the plugin entry from the two OpenCode files.
+On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, and the secret `lab-api-key`. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, and remove the `lab` provider and the plugin entry from the two OpenCode files.
 
 ## Where the data is
 
