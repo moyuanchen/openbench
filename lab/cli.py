@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="lab", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
-    sub.add_parser("init", help="one-time setup: API key in .secrets/ and the `lab-api-key` Modal Secret")
+    sub.add_parser("init", help="one-time setup: API key and Modal proxy token in .secrets/, and the `lab-api-key` Modal Secret")
     sub.add_parser("ls", help="models in models.toml with deploy state, running containers and URL")
     p = sub.add_parser("pull", help="download a model's weights into the Modal volume (CPU only)")
     p.add_argument("name")
@@ -86,6 +86,19 @@ def cmd_init(args) -> None:
     if result.returncode != 0:
         raise RuntimeError("could not create the `lab-api-key` Modal Secret (is `modal` logged in?)")
     print("Modal Secret `lab-api-key`: up to date. Volumes are created on first pull/deploy.")
+
+    token_files = profiles.PROXY_TOKEN_FILES
+    shown = " and ".join(str(path.relative_to(REPO)) for path in token_files.values())
+    if all(path.exists() for path in token_files.values()):
+        print(f"Modal proxy token: using existing {shown}")
+        return
+    result = cloud.modal_cli("workspace", "proxy-tokens", "create", "--json", capture=True)
+    if result.returncode != 0:
+        raise RuntimeError("could not create a Modal proxy token (is `modal` logged in?)")
+    token = json.loads(result.stdout)  # {"Modal-Key": ..., "Modal-Secret": ..., "Authorization": ...}
+    for name, path in token_files.items():
+        cloud.private_write(path, token[name])
+    print(f"Modal proxy token: created {shown}")
 
 
 def cmd_ls(args) -> None:
@@ -195,7 +208,8 @@ def cmd_warm(args) -> None:
 
     print(f"Waiting for {spec.name} to answer (a cold start takes a few minutes)...", flush=True)
     t0 = time.monotonic()
-    with urllib.request.urlopen(f"{url}/health", timeout=30 * 60) as response:
+    request = urllib.request.Request(f"{url}/health", headers=profiles.proxy_auth_headers())
+    with urllib.request.urlopen(request, timeout=30 * 60) as response:
         response.read()
     print(f"{spec.name}: ready ({time.monotonic() - t0:.0f}s)")
 

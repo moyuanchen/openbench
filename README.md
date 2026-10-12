@@ -88,6 +88,8 @@ lab init
 
 This generates a random API key in `.secrets/api-key` and stores it in your Modal workspace as the secret `lab-api-key`. Your model endpoints reject any request that doesn't carry this key.
 
+It also creates a Modal proxy token, saved in `.secrets/modal-key` and `.secrets/modal-secret`. Modal checks it before a request reaches your app, so someone who finds an endpoint URL can't start a GPU on your bill. Without the token, Modal answers 401 and no container starts.
+
 ### 6. Serve your first model
 
 Every model is an entry in `models.toml`, and each entry has two identifiers. For example:
@@ -157,7 +159,7 @@ Use the arrow keys or type the digit, then press Enter. Esc skips the rating, wh
 
 | Command | What it does |
 |---|---|
-| `lab init` | One-time setup: API key and Modal Secret |
+| `lab init` | One-time setup: API key, Modal Secret and Modal proxy token |
 | `lab ls` | Models in `models.toml`: GPU, deployed or not, running containers, warm-until time, URL |
 | `lab pull <name>` | Download weights into the `lab-hf-cache` volume on a CPU-only function |
 | `lab deploy <name> \| --all` | Deploy or redeploy, reapply the scaling in `models.toml`, update OpenCode |
@@ -249,7 +251,7 @@ MCP servers change the measurements:
 - **Backups:** before every write, the previous version of each file is copied to `.lab/backups/`.
 - **Comments in your config:** if either file contains comments (JSONC), `lab` refuses to merge rather than risk losing them. Remove the comments or move them elsewhere.
 
-On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, and the secret `lab-api-key`. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, and remove the `lab` provider and the plugin entry from the two OpenCode files.
+On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, the secret `lab-api-key`, and a workspace proxy token. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, delete the token (`modal workspace proxy-tokens list`, then `delete <id>`), and remove the `lab` provider and the plugin entry from the two OpenCode files.
 
 ## Where the data is
 
@@ -271,6 +273,7 @@ The three sources are linked by ids. A rating carries the prompt's message id, a
 ## Troubleshooting
 
 - **`lab init` says Modal isn't logged in:** run `modal setup` with the venv active.
+- **Requests fail with "modal-http: missing credentials for proxy authorization":** the client isn't sending the proxy token. Run `lab init` (it creates the token if `.secrets/modal-key` is missing), then `lab use <profile>`, and restart OpenCode. Other clients need the `Modal-Key` and `Modal-Secret` headers as well as the API key.
 - **A prompt hangs for minutes:** this is probably a cold start. `lab ls` shows running containers, and `lab logs <name> -f` shows vLLM starting up.
 - **A container keeps crashing at startup:** Modal keeps retrying it on a GPU while a request waits, and that GPU time is billed. Check `lab logs <name>`, then run `lab stop <name>`. Common causes are a GPU too small for the weights or a missing vLLM flag for the model.
 - **vLLM fails with an import error:** vLLM and `transformers` are pinned together in `serving/vllm_server.py`. If you change one, change the other to a compatible version.
@@ -296,6 +299,6 @@ serving/               runs on Modal
   metrics.py           the per-request log writer
   ollama_server.py     Ollama backend (experimental, not tested on a GPU)
 plugins/feedback.ts    OpenCode plugin for the 1–4 rating
-build/opencode.json    generated from the active profile
-.secrets/ .lab/ metrics/   gitignored: API key, local state, collected data
+build/opencode.json    generated from the active profile (gitignored: your endpoint URLs)
+.secrets/ .lab/ metrics/   gitignored: API key and proxy token, local state, collected data
 ```

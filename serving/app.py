@@ -76,7 +76,9 @@ serve_options = {key: SPEC[key] for key in ("cpu", "memory", "region", "buffer_c
     **serve_options,
 )
 @modal.concurrent(max_inputs=SPEC["max_concurrent"])
-@modal.asgi_app()
+# Modal checks the proxy token (Modal-Key/Modal-Secret headers, from `lab init`) before routing to a container, so
+# a request without it can't start a GPU. The proxy's own API key check stays behind it.
+@modal.asgi_app(requires_proxy_auth=True)
 def serve():
     t0 = time.monotonic()
     recorder = metrics.Recorder(METRICS_DIR, SPEC, metrics_volume.commit)

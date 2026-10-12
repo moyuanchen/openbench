@@ -11,6 +11,8 @@ from lab.registry import REPO, Spec
 PROFILES_DIR = REPO / "profiles"
 BUILD_FILE = REPO / "build" / "opencode.json"
 KEY_FILE = REPO / ".secrets" / "api-key"
+# Modal proxy token (`lab init`): header name -> file holding its value.
+PROXY_TOKEN_FILES = {"Modal-Key": REPO / ".secrets" / "modal-key", "Modal-Secret": REPO / ".secrets" / "modal-secret"}
 BACKUP_DIR = REPO / ".lab" / "backups"
 GLOBAL_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 GLOBAL_TUI_CONFIG = Path.home() / ".config" / "opencode" / "tui.json"
@@ -58,6 +60,8 @@ def render(profile: dict, specs: dict[str, Spec], urls: dict[str, str]) -> tuple
                 "name": "Lab (Modal)",
                 "options": {
                     "apiKey": "{file:" + str(KEY_FILE) + "}",
+                    # Modal's proxy auth, checked before a request reaches a container (serving/app.py).
+                    "headers": {name: "{file:" + str(path) + "}" for name, path in PROXY_TOKEN_FILES.items()},
                     # Cold starts load the weights before the first byte comes back.
                     "timeout": 900000,
                     "headerTimeout": 900000,
@@ -74,6 +78,14 @@ def render(profile: dict, specs: dict[str, Spec], urls: dict[str, str]) -> tuple
             config["model"] = default
     config.update(profile.get("opencode", {}))
     return config, warnings
+
+
+def proxy_auth_headers() -> dict[str, str]:
+    """The Modal proxy token as request headers, for lab's own requests to the endpoints."""
+    for path in PROXY_TOKEN_FILES.values():
+        if not path.exists():
+            raise FileNotFoundError(f"{path.relative_to(REPO)} is missing: run `lab init`")
+    return {name: path.read_text().strip() for name, path in PROXY_TOKEN_FILES.items()}
 
 
 def write_build(config: dict) -> None:

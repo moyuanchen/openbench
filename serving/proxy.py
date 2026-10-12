@@ -13,8 +13,8 @@ import json
 import time
 import uuid
 
-# Hop-by-hop and length headers must not be forwarded verbatim.
-DROP_REQUEST = {"host", "content-length", "authorization", "connection"}
+# Hop-by-hop and length headers must not be forwarded verbatim; credentials stop here.
+DROP_REQUEST = {"host", "content-length", "authorization", "connection", "modal-key", "modal-secret"}
 DROP_RESPONSE = {"content-length", "content-encoding", "transfer-encoding", "connection"}
 
 
