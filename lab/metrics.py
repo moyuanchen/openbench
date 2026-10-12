@@ -1,36 +1,58 @@
-"""`lab metrics`: token usage and completion time per model, from the traces in lab/traces.py.
+"""`lab metrics`: token usage and completion time per harness and model, from the traces in lab/traces.py.
 
+OpenCode (our models on Modal):
 server   the proxy's line per request (all requests, including OpenCode's side requests such as session titles)
 client   OpenCode's own record of each prompt and step (one step = one request)
 ratings  the 1–4 ratings from the rating plugin
+
+Gemini CLI (Google's API; lab/gemini.py): its own telemetry, one entry per call, and the ratings from `/rate` and
+the pop-up. Times are measured on this machine, so they include the network; there is no server side.
 """
 
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from lab import traces
+from lab import gemini, traces
 
 download = traces.download
 
 
-def summarize(since: datetime, model: str | None = None) -> dict[str, dict]:
-    server = traces.server_records(since)
-    prompts = defaultdict(list)
-    for prompt in traces.load(since):
-        prompts[prompt.model].append(prompt)
-    ratings = traces.ratings(since)
-    names = sorted(set(server) | set(prompts) | set(ratings))
-    return {name: _summary(server.get(name, []), prompts.get(name, []), ratings.get(name, []))
-            for name in names if model in (None, name)}
+def summarize(since: datetime, model: str | None = None, harnesses: tuple[str, ...] = ("opencode",)) -> dict:
+    """{harness: {model: summary}} for the chosen harnesses."""
+    out = {}
+    if "opencode" in harnesses:
+        server = traces.server_records(since)
+        prompts = defaultdict(list)
+        for prompt in traces.load(since):
+            prompts[prompt.model].append(prompt)
+        ratings = traces.ratings(since)
+        names = sorted(set(server) | set(prompts) | set(ratings))
+        out["opencode"] = {name: _summary(server.get(name, []), prompts.get(name, []), ratings.get(name, []))
+                           for name in names if model in (None, name)}
+    if "gemini" in harnesses:
+        prompts = defaultdict(list)
+        for prompt in gemini.load(since):
+            prompts[prompt.model].append(prompt)
+        out["gemini"] = {name: _gemini_summary(rows) for name, rows in sorted(prompts.items()) if model in (None, name)}
+    return out
 
 
-def render(summaries: dict[str, dict], since: datetime) -> str:
-    if not summaries:
-        return f"No data since {since:%Y-%m-%d %H:%M}."
+def render(summaries: dict, since: datetime) -> str:
+    out = []
+    for harness, models in summaries.items():
+        title = {"opencode": "OpenCode (lab models on Modal)", "gemini": "Gemini CLI (Google's API)"}[harness]
+        out += [f"== {title}, since {since.astimezone():%Y-%m-%d %H:%M}", ""]
+        if not models:
+            out += ["No data.", ""]
+        out += (_render_gemini if harness == "gemini" else _render_opencode)(models)
+    return "\n".join(out).rstrip()
+
+
+def _render_opencode(summaries: dict[str, dict]) -> list[str]:
     out = []
     for name, s in summaries.items():
         srv, cli, rat = s["server"], s["client"], s["ratings"]
-        out.append(f"{name}  (since {since.astimezone():%Y-%m-%d %H:%M})")
+        out.append(name)
         if srv["requests"] or srv["container_starts"]:
             out.append(f"  server   {srv['requests']} requests ({srv['side_requests']} side requests without tools, e.g. "
                        f"session titles: {srv['side_prompt_tokens']:,} tokens in)")
@@ -47,12 +69,37 @@ def render(summaries: dict[str, dict], since: datetime) -> str:
             out.append(f"           prompt time p50 {_s(cli['prompt_s']['p50'])} · p95 {_s(cli['prompt_s']['p95'])}   "
                        f"step p50 {_s(cli['step_s']['p50'])}   network+queue p50 {_s(s['overhead_s']['p50'])} "
                        f"({s['matched_steps']} steps matched to server requests)")
-        if rat["prompts"]:
-            dist = " ".join(f"{k}:{rat['distribution'].get(k, 0)}" for k in (4, 3, 2, 1))
-            out.append(f"  ratings  {rat['rated']} of {rat['prompts']} rated · avg {_n(rat['average'])} · {dist} · "
-                       f"{rat['prompts'] - rat['rated']} skipped")
+        out += _render_ratings(rat)
         out.append("")
-    return "\n".join(out).rstrip()
+    return out
+
+
+def _render_gemini(summaries: dict[str, dict]) -> list[str]:
+    out = []
+    for name, s in summaries.items():
+        calls, side = s["calls"], s["side"]
+        out.append(name)
+        out.append(f"  calls    {calls['calls']} calls for {s['prompts']} prompts · {calls['errors']} errors"
+                   + (f" ({calls['rate_limited']} rate-limited)" if calls["rate_limited"] else ""))
+        out.append(f"           tokens in {calls['prompt_tokens']:,} ({calls['cached_tokens']:,} cached) · "
+                   f"out {calls['output_tokens']:,}" + (f" (+{calls['thoughts_tokens']:,} thinking)" if calls['thoughts_tokens'] else ""))
+        out.append(f"           call time p50 {_s(calls['call_s']['p50'])} · p95 {_s(calls['call_s']['p95'])}   "
+                   f"prompt time p50 {_s(s['prompt_s']['p50'])} · p95 {_s(s['prompt_s']['p95'])}")
+        if side["calls"]:
+            roles = ", ".join(f"{role} {n}" for role, n in side["roles"].items())
+            out.append(f"  side     {side['calls']} calls by Gemini CLI itself ({roles}): tokens in "
+                       f"{side['prompt_tokens']:,} · out {side['output_tokens']:,}")
+        out += _render_ratings(s["ratings"])
+        out.append("")
+    return out
+
+
+def _render_ratings(rat: dict) -> list[str]:
+    if not rat["prompts"]:
+        return []
+    dist = " ".join(f"{k}:{rat['distribution'].get(k, 0)}" for k in (4, 3, 2, 1))
+    return [f"  ratings  {rat['rated']} of {rat['prompts']} rated · avg {_n(rat['average'])} · {dist} · "
+            f"{rat['prompts'] - rat['rated']} skipped"]
 
 
 def _summary(server: list[dict], prompts: list[traces.Prompt], ratings: list[dict]) -> dict:
@@ -63,7 +110,6 @@ def _summary(server: list[dict], prompts: list[traces.Prompt], ratings: list[dic
     steps = [s for p in prompts for s in p.steps if s.end is not None]
     done = [p for p in prompts if p.end is not None]
     overhead = [s.duration_s - s.request["t_done"] for s in steps if s.request]  # network, Modal routing, queueing
-    rated = [r["rating"] for r in ratings if r.get("rating") is not None]
     return {
         "server": {
             "requests": len(requests),
@@ -93,12 +139,48 @@ def _summary(server: list[dict], prompts: list[traces.Prompt], ratings: list[dic
         },
         "overhead_s": _stats(overhead),
         "matched_steps": len(overhead),
-        "ratings": {
-            "prompts": len(ratings),
-            "rated": len(rated),
-            "average": sum(rated) / len(rated) if rated else None,
-            "distribution": {k: rated.count(k) for k in (1, 2, 3, 4)},
+        "ratings": _ratings(ratings),
+    }
+
+
+def _gemini_summary(prompts: list[traces.Prompt]) -> dict:
+    calls = [s for p in prompts for s in p.steps]
+    side = [s for p in prompts for s in p.side]
+    ok = [s for s in calls if not s.error]
+    done = [p for p in prompts if p.end is not None]
+    roles = defaultdict(int)
+    for s in side:
+        roles[(s.role or "?").removeprefix("utility_")] += 1
+    return {
+        "prompts": len(prompts),
+        "calls": {
+            "calls": len(calls),
+            "errors": len(calls) - len(ok),
+            "rate_limited": sum(1 for s in calls if s.error and " 429" in s.error),
+            "prompt_tokens": sum(s.prompt_tokens for s in ok),
+            "cached_tokens": sum(s.cache_read for s in ok),
+            "output_tokens": sum(s.output for s in ok),
+            "thoughts_tokens": sum(s.reasoning for s in ok),
+            "call_s": _stats([s.duration_s for s in ok]),
         },
+        "side": {
+            "calls": len(side),
+            "roles": dict(sorted(roles.items(), key=lambda kv: -kv[1])),
+            "prompt_tokens": sum(s.prompt_tokens for s in side),
+            "output_tokens": sum(s.output + s.reasoning for s in side),
+        },
+        "prompt_s": _stats([p.duration_s for p in done]),
+        "ratings": _ratings([p.rating for p in prompts if p.rating]),
+    }
+
+
+def _ratings(records: list[dict]) -> dict:
+    rated = [r["rating"] for r in records if r.get("rating") is not None]
+    return {
+        "prompts": len(records),
+        "rated": len(rated),
+        "average": sum(rated) / len(rated) if rated else None,
+        "distribution": {k: rated.count(k) for k in (1, 2, 3, 4)},
     }
 
 

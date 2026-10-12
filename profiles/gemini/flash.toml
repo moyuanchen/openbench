@@ -1,0 +1,9 @@
+# Gemini CLI profile "flash". With Gemini CLI active (`lab harness gemini`), `lab use flash` writes it into
+# ~/.gemini/settings.json (only the keys listed in the README; your other settings stay).
+
+model    = "gemini-3.5-flash"         # pinned: "auto" would let Gemini CLI pick Pro or Flash for each prompt
+feedback = true                       # rating pop-up after each answer (needs a screen); `/rate 1-4` always works
+# auth   = "api-key"                  # "api-key" (GEMINI_API_KEY; recommended) or "google-login" (quotas, may fall back to Flash)
+
+# [gemini]                            # copied as-is into ~/.gemini/settings.json, for any other Gemini CLI setting
+# model.compressionThreshold = 0.5

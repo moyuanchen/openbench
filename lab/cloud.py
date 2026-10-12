@@ -87,9 +87,14 @@ def cancel_call(call_id: str) -> None:
 
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"urls": {}, "warm": {}, "active_profile": None, "managed_keys": []}
+    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {"urls": {}, "warm": {}}
+    # `harness` is the one `lab use` and the views work on; `profiles` holds each harness's current profile.
+    # Before harnesses, the OpenCode profile was `active_profile`.
+    state.setdefault("profiles", {"opencode": state.pop("active_profile", None)})
+    state.setdefault("harness", "opencode")
+    state.setdefault("managed_keys", [])  # top-level OpenCode config keys the profile set
+    state.setdefault("gemini_managed", [])  # Gemini CLI settings paths the profile's [gemini] table set
+    return state
 
 
 def save_state(state: dict) -> None:

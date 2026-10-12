@@ -1,5 +1,7 @@
 """The saved traces, joined per prompt: what `lab metrics`, `lab prompts` and `lab show` read.
 
+This module reads OpenCode's traces; lab/gemini.py reads Gemini CLI's into the same Prompt and Step records.
+
 opencode  OpenCode's session database (read-only): every prompt, its steps (one model request each) with
           tokens and times, and the full conversation (text, tool calls, edits)
 server    one line per request, written by the proxy into the `lab-metrics` Volume (downloaded to metrics/server/)
@@ -46,6 +48,9 @@ class Step:
     finish: str | None
     error: str | None
     request: dict | None = None  # the proxy's line for the same request, when matched
+    role: str | None = None  # Gemini CLI: "main" or "subagent" (its utility calls go in Prompt.side)
+    model: str | None = None  # Gemini CLI: the model that answered this call
+    parts: list[dict] | None = None  # Gemini CLI: the reply's content, from its chat file
 
     @property
     def prompt_tokens(self) -> int:
@@ -71,6 +76,9 @@ class Prompt:
     text: str
     steps: list[Step] = field(default_factory=list)
     rating: dict | None = None  # the rating log line, if the plugin asked
+    harness: str = "opencode"
+    parts: list[dict] | None = None  # Gemini CLI: the prompt's content, from its chat file
+    side: list[Step] = field(default_factory=list)  # Gemini CLI's own calls (routing, loop checks, …)
 
     @property
     def end(self) -> float | None:
@@ -91,6 +99,8 @@ class Prompt:
 
     @property
     def open_command(self) -> str:
+        if self.harness == "gemini":
+            return f"cd {self.directory or '<project>'} && gemini --resume {self.session_id}"
         return f"opencode {self.directory} -s {self.session_id}"
 
 
@@ -138,7 +148,7 @@ def ratings(since: datetime) -> dict[str, list[dict]]:
             ts = datetime.fromisoformat(record["ts"].replace("Z", "+00:00"))
         except (ValueError, KeyError):
             continue
-        if ts >= since:
+        if ts >= since and record.get("harness", "opencode") == "opencode":
             by_model[record["model"].removeprefix(f"{PROVIDER_ID}/")].append(record)
     return by_model
 
@@ -294,11 +304,13 @@ def rating_value(prompt: Prompt) -> int | str | None:
 
 
 def render_list(prompts: list[Prompt], width: int) -> str:
-    rows = [("ID", "WHEN", "MODEL", "AGENT", "RATING", "STEPS", "TOKENS IN", "OUT", "TIME", "PROMPT")]
+    mixed = len({p.harness for p in prompts}) > 1
+    rows = [(*(("HARNESS",) if mixed else ()), "ID", "WHEN", "MODEL", "AGENT", "RATING", "STEPS", "TOKENS IN", "OUT",
+             "TIME", "PROMPT")]
     for p in prompts:
-        rows.append((p.id[-8:], f"{datetime.fromtimestamp(p.start):%m-%d %H:%M}", p.model, p.agent,
-                     str(rating_value(p) or "-"), str(len(p.steps)), f"{p.tokens_in:,}", f"{p.tokens_out:,}",
-                     _time(p), (p.text.splitlines() or [""])[0]))
+        rows.append((*((p.harness,) if mixed else ()), p.id[-8:], f"{datetime.fromtimestamp(p.start):%m-%d %H:%M}",
+                     p.model, p.agent, str(rating_value(p) or "-"), str(len(p.steps)), f"{p.tokens_in:,}",
+                     f"{p.tokens_out:,}", _time(p), (p.text.splitlines() or [""])[0]))
     widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]) - 1)]
     room = max(20, width - sum(widths) - 2 * len(widths))
     lines = ["  ".join([*(cell.ljust(w) for cell, w in zip(row, widths)), _cut(row[-1], room)]).rstrip()
@@ -310,25 +322,36 @@ def render_list(prompts: list[Prompt], width: int) -> str:
 def render_show(prompts: list[Prompt], note: str | None, full: bool) -> str:
     first = prompts[0]
     out = [f"({note})"] if note else []
+    gemini = first.harness == "gemini"
     out.append(f"Session {first.session_id}  “{first.session_title}”" + ("  (subagent)" if first.subagent else ""))
-    out.append(f"  open in OpenCode: {first.open_command}")
-    content = parts([p.id for p in prompts] + [s.id for p in prompts for s in p.steps])
+    out.append(f"  open in {'Gemini CLI' if gemini else 'OpenCode'}: {first.open_command}")
+    content = {} if gemini else parts([p.id for p in prompts] + [s.id for p in prompts for s in p.steps])
     for p in prompts:
         rating = rating_value(p)
         cached = sum(s.cache_read for s in p.steps)
-        out += ["", f"── Prompt {p.id} · {datetime.fromtimestamp(p.start):%Y-%m-%d %H:%M:%S} · lab/{p.model} · {p.agent}",
+        model = p.model if gemini else f"lab/{p.model}"
+        out += ["", f"── Prompt {p.id} · {datetime.fromtimestamp(p.start):%Y-%m-%d %H:%M:%S} · {model} · {p.agent}",
                 f"   rating {_rating_text(rating)} · {len(p.steps)} steps · tokens in {p.tokens_in:,} "
-                f"({cached:,} cached) · out {p.tokens_out:,} · {_time(p)}", "", "You"]
-        out += _parts(content.get(p.id, []), full)
+                f"({cached:,} cached) · out {p.tokens_out:,} · {_time(p)}"]
+        if p.side:
+            roles = sorted({(s.role or "?").removeprefix("utility_") for s in p.side})
+            out.append(f"   {len(p.side)} side calls by Gemini CLI ({', '.join(roles)}): "
+                       f"tokens in {sum(s.prompt_tokens for s in p.side):,} · out {sum(s.output for s in p.side):,}")
+        out += ["", "You"]
+        out += _parts(p.parts or [] if gemini else content.get(p.id, []), full)
+        if gemini and not p.parts:
+            out.append("  (not in Gemini CLI's chat file: deleted, or rewound with /rewind)")
         for i, step in enumerate(p.steps, 1):
             out += ["", f"Step {i} · " + _step_numbers(step)]
-            out += _parts(content.get(step.id, []), full)
+            out += _parts(step.parts or [] if gemini else content.get(step.id, []), full)
     return "\n".join(out)
 
 
 def _step_numbers(step: Step) -> str:
     bits = [_s(step.duration_s) if step.end else "unfinished",
             f"in {step.input:,} + {step.cache_read:,} cached", f"out {step.output:,}"]
+    if step.role and step.role != "main":
+        bits.insert(0, step.role)
     if step.reasoning:
         bits.append(f"{step.reasoning:,} reasoning")
     if step.finish not in (None, "stop", "tool-calls"):
@@ -394,6 +417,8 @@ def _rating_text(rating) -> str:
 
 def _time(prompt: Prompt) -> str:
     errors = [s.error for s in prompt.steps if s.error]
+    if prompt.harness == "gemini":  # Gemini CLI retries failed calls itself (e.g. 429): only the last one counts
+        errors = errors if prompt.steps and prompt.steps[-1].error else []
     if errors:
         return "aborted" if errors[-1].startswith("MessageAbortedError") else "error"
     return "-" if prompt.duration_s is None else _s(prompt.duration_s)

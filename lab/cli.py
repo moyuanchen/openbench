@@ -1,7 +1,9 @@
-"""`lab`: serve models from models.toml on Modal and wire them into OpenCode."""
+"""`lab`: serve models from models.toml on Modal, wire them into OpenCode, and log and rate prompts in OpenCode
+and Gemini CLI."""
 
 import argparse
 import json
+import os
 import secrets
 import shutil
 import sys
@@ -9,7 +11,7 @@ import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from lab import cloud, metrics, profiles, registry, traces
+from lab import cloud, gemini, metrics, profiles, registry, traces
 from lab.registry import REPO
 
 MAX_WARM = 23 * 3600  # the keeper runs as one Modal function call, and those are capped at 24h
@@ -36,25 +38,31 @@ def main(argv: list[str] | None = None) -> None:
     group.add_argument("--for", dest="duration", metavar="DURATION", help='keep 1 container up, e.g. "90m", "2h"')
     group.add_argument("--off", action="store_true", help="end a --for period now")
     p.add_argument("--yes", action="store_true")
-    p = sub.add_parser("use", help="switch OpenCode to a profile (profiles/<name>.toml)")
+    p = sub.add_parser("harness", help="show the harnesses, or switch to one (opencode, gemini)")
+    p.add_argument("name", nargs="?", choices=list(profiles.HARNESSES))
+    p = sub.add_parser("use", help="choose a profile for the active harness (profiles/<harness>/<name>.toml)")
     p.add_argument("profile")
-    sub.add_parser("profiles", help="list profiles; * marks the active one")
-    sub.add_parser("sync", help="re-apply the active profile (e.g. after a deploy)")
-    p = sub.add_parser("metrics", help="token usage, response times and ratings per model")
+    sub.add_parser("profiles", help="list the active harness's profiles; * marks the current one")
+    sub.add_parser("sync", help="re-apply the active harness's profile (OpenCode: e.g. after a deploy)")
+    harness_help = "opencode, gemini or all (default: the active harness)"
+    p = sub.add_parser("metrics", help="token usage, response times and ratings per harness and model")
     p.add_argument("--since", default="7d", help='how far back, e.g. "24h", "7d" (default 7d)')
-    p.add_argument("--model", help="only this models.toml entry")
+    p.add_argument("--model", help="only this model")
+    p.add_argument("--harness", choices=[*profiles.HARNESSES, "all"], help=harness_help)
     p.add_argument("--json", action="store_true", help="print the summary as JSON")
     p.add_argument("--offline", action="store_true", help="don't download new server logs first")
     p = sub.add_parser("prompts", help="find prompts by time, tokens or rating (newest first); `lab show` opens one")
     p.add_argument("--since", default="7d", help='how far back, e.g. "24h", "7d" (default 7d)')
-    p.add_argument("--model", help="only this models.toml entry")
+    p.add_argument("--model", help="only this model")
+    p.add_argument("--harness", choices=[*profiles.HARNESSES, "all"], help=harness_help)
     p.add_argument("--rating", help='only these ratings, e.g. "1,2"; "skip" = dialog dismissed, "none" = not asked')
     p.add_argument("--sort", choices=["time", "tokens", "duration"], default="time",
                    help="newest (default), most tokens, or slowest first")
     p.add_argument("-n", "--limit", type=int, default=20, help="how many to list (default 20)")
     p.add_argument("--offline", action="store_true", help="don't download new server logs first")
     p = sub.add_parser("show", help="a prompt's conversation with its numbers (tokens, times, rating)")
-    p.add_argument("id", help="a prompt ID from `lab prompts`, a session id, or a server request id (any unique part)")
+    p.add_argument("id", help="a prompt ID from `lab prompts`, a session id, or a server request id (any unique part); "
+                              "any harness")
     p.add_argument("--full", action="store_true", help="don't shorten tool calls and outputs")
     p.add_argument("--offline", action="store_true", help="don't download new server logs first")
     p = sub.add_parser("logs", help="a model's Modal app logs (recent lines, or -f to stream)")
@@ -214,34 +222,65 @@ def cmd_warm(args) -> None:
     print(f"{spec.name}: ready ({time.monotonic() - t0:.0f}s)")
 
 
+def cmd_harness(args) -> None:
+    state = cloud.load_state()
+    if args.name:
+        state["harness"] = args.name
+        name = state["profiles"].get(args.name)
+        if not name:
+            choices = profiles.names(args.name)
+            if not choices:
+                raise FileNotFoundError(f"no profiles in profiles/{args.name}/")
+            name = choices[0]
+            print(f"{profiles.HARNESSES[args.name]} has no profile yet: using {name!r} "
+                  f"(others: {', '.join(choices[1:]) or 'none'}; `lab use <profile>` changes it)")
+        _apply(state, args.name, name)
+        return
+    rows = [("", "HARNESS", "PROFILE", "RUN")]
+    for harness in profiles.HARNESSES:
+        name = state["profiles"].get(harness)
+        rows.append(("*" if harness == state["harness"] else "", harness, name or "-",
+                     harness if name else f"(not set up: `lab harness {harness}`)"))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+    print("\n* = active: `lab use`, `lab profiles`, `lab metrics` and `lab prompts` work on it. "
+          "Both stay set up and logged.")
+
+
 def cmd_use(args) -> None:
     state = cloud.load_state()
-    state["active_profile"] = args.profile
-    _resync(state, required=True)
+    _apply(state, state["harness"], args.profile)
 
 
 def cmd_profiles(args) -> None:
-    active = cloud.load_state().get("active_profile")
-    for name in profiles.names():
-        print(("* " if name == active else "  ") + name)
+    state = cloud.load_state()
+    harness = state["harness"]
+    print(f"{profiles.HARNESSES[harness]} profiles (`lab harness` switches harness):")
+    for name in profiles.names(harness):
+        print(("* " if name == state["profiles"].get(harness) else "  ") + name)
 
 
 def cmd_sync(args) -> None:
-    _resync(cloud.load_state(), required=True)
+    state = cloud.load_state()
+    name = state["profiles"].get(state["harness"])
+    if not name:
+        raise ValueError(f"no {state['harness']} profile yet; run `lab use <profile>`")
+    _apply(state, state["harness"], name)
 
 
 def cmd_metrics(args) -> None:
     since = metrics.since_cutoff(registry.parse_duration(args.since))
-    if not args.offline:
-        metrics.download()
-    summaries = metrics.summarize(since, args.model)
+    harnesses = _harnesses(args.harness)
+    _refresh(harnesses, args.offline)
+    summaries = metrics.summarize(since, args.model, harnesses)
     print(json.dumps(summaries, indent=2) if args.json else metrics.render(summaries, since))
 
 
 def cmd_prompts(args) -> None:
-    if not args.offline:
-        traces.download()
-    prompts = traces.load(metrics.since_cutoff(registry.parse_duration(args.since)))
+    harnesses = _harnesses(args.harness)
+    _refresh(harnesses, args.offline)
+    prompts = _prompts(harnesses, metrics.since_cutoff(registry.parse_duration(args.since)))
     if args.model:
         prompts = [p for p in prompts if p.model == args.model]
     if args.rating:
@@ -252,34 +291,83 @@ def cmd_prompts(args) -> None:
            "duration": lambda p: p.duration_s or 0}[args.sort]
     prompts = sorted(prompts, key=key, reverse=True)[: args.limit]
     if not prompts:
-        print(f"No prompts to lab models since {args.since} ago match.")
+        print(f"No {' or '.join(profiles.HARNESSES[h] for h in harnesses)} prompts since {args.since} ago match.")
         return
     print(traces.render_list(prompts, shutil.get_terminal_size().columns))
 
 
 def cmd_show(args) -> None:
-    if not args.offline:
-        traces.download()
+    harnesses = tuple(profiles.HARNESSES)
+    _refresh(harnesses, args.offline)
     since = datetime.fromtimestamp(0, timezone.utc)
     requests = [r for rows in traces.server_records(since).values() for r in rows if "event" not in r]
-    prompts, note = traces.find(args.id, traces.load(since), requests)
+    prompts, note = traces.find(args.id, _prompts(harnesses, since), requests)
     print(traces.render_show(prompts, note, args.full))
+
+
+def _harnesses(choice: str | None) -> tuple[str, ...]:
+    if choice == "all":
+        return tuple(profiles.HARNESSES)
+    return (choice or cloud.load_state()["harness"],)
+
+
+def _refresh(harnesses: tuple[str, ...], offline: bool) -> None:
+    """Bring the local copies up to date: OpenCode's server lines from Modal, Gemini CLI's telemetry."""
+    if "opencode" in harnesses and not offline:
+        traces.download()
+    if "gemini" in harnesses:
+        gemini.extract()
+
+
+def _prompts(harnesses: tuple[str, ...], since: datetime) -> list[traces.Prompt]:
+    prompts = []
+    if "opencode" in harnesses:
+        prompts += traces.load(since)
+    if "gemini" in harnesses:
+        prompts += gemini.load(since)
+    return sorted(prompts, key=lambda p: p.start)
 
 
 def cmd_logs(args) -> None:
     cloud.modal_cli("app", "logs", registry.get(args.name).app_name, *(["-f"] if args.follow else []))
 
 
+def _apply(state: dict, harness: str, name: str) -> None:
+    """Write a harness's profile into its config and remember it as that harness's profile."""
+    if harness == "opencode":
+        profiles.load("opencode", name)  # fail before changing the state
+        state["profiles"]["opencode"] = name
+        _resync(state, required=True)
+        print("Run `opencode` (restart it if it's open).")
+        return
+    profile = profiles.load("gemini", name)
+    backup, state["gemini_managed"] = gemini.apply(name, profile, state["gemini_managed"])
+    state["profiles"]["gemini"] = name
+    cloud.save_state(state)
+    print(f"Gemini CLI profile {name!r}: {profile['model']}. Wrote {gemini.SETTINGS_FILE}"
+          + (f" (backup: {backup.relative_to(REPO)})" if backup else "") + f" and {gemini.RATE_COMMAND}")
+    print(f"Ratings: `/rate 1-4` in Gemini CLI; pop-up after each answer {'on' if profile.get('feedback') else 'off'}"
+          " (profile key `feedback`)")
+    if profile.get("auth", "api-key") == "api-key" and not os.environ.get("GEMINI_API_KEY"):
+        print("warning: GEMINI_API_KEY isn't set in this shell; add it to your shell profile (Google AI Studio key)")
+    if not shutil.which("gemini"):
+        print("warning: `gemini` isn't on PATH; install it with `npm install -g @google/gemini-cli@0.61.0`")
+    print("Run `gemini` (restart it if it's open).")
+
+
 def _resync(state: dict, required: bool = False) -> None:
-    """Render the active profile to build/opencode.json and copy it into the global OpenCode config."""
-    name = state.get("active_profile")
+    """Render OpenCode's profile to build/opencode.json and copy it into the global OpenCode config.
+
+    Runs after deploys and stops whatever the active harness is: OpenCode's config lists the deployed models.
+    """
+    name = state["profiles"].get("opencode")
     if not name:
         if required:
-            raise ValueError("no active profile; run `lab use <profile>`")
+            raise ValueError("no OpenCode profile; run `lab harness opencode`, then `lab use <profile>`")
         cloud.save_state(state)
-        print("OpenCode not updated: no active profile yet (`lab use ministral`)")
+        print("OpenCode not updated: no profile yet (`lab harness opencode`, then `lab use <profile>`)")
         return
-    profile = profiles.load(name)
+    profile = profiles.load("opencode", name)
     config, warnings = profiles.render(profile, registry.load(), state["urls"])
     profiles.write_build(config)
     backup, state["managed_keys"] = profiles.apply_global(config, state.get("managed_keys", []))
@@ -310,7 +398,8 @@ def _human(seconds: int) -> str:
 
 COMMANDS = {
     "init": cmd_init, "ls": cmd_ls, "pull": cmd_pull, "deploy": cmd_deploy, "stop": cmd_stop,
-    "warm": cmd_warm, "use": cmd_use, "profiles": cmd_profiles, "sync": cmd_sync, "logs": cmd_logs,
+    "warm": cmd_warm, "harness": cmd_harness, "use": cmd_use, "profiles": cmd_profiles, "sync": cmd_sync,
+    "logs": cmd_logs,
     "metrics": cmd_metrics, "prompts": cmd_prompts, "show": cmd_show,
 }
 

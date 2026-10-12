@@ -4,6 +4,8 @@ Benchmark open-weight models by doing real work with them.
 
 openrate serves open-weight models on [Modal](https://modal.com) GPUs and connects them to [OpenCode](https://opencode.ai), the terminal coding agent. You code as usual. In the background, openrate records every token, every response time and your own rating of each answer, and links them all to the conversation they came from.
 
+It can also record and rate [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions, which run on Google's own API, so you can compare Gemini models with yours on the same kind of work. See [Gemini CLI](#gemini-cli).
+
 ## Why
 
 Leaderboards score models on fixed tasks. openrate scores them on the work you actually do. Each prompt you send gets three kinds of measurement:
@@ -108,7 +110,7 @@ The models already in `models.toml` come with their hardware configured. Run `la
 lab ls                         # model names, their GPU, and whether they're deployed
 lab pull <model>               # download the weights into a Modal Volume (CPU only; waits until done)
 lab deploy <model>             # deploy the model's Modal app and print its URL
-lab profiles                   # OpenCode setups in profiles/
+lab profiles                   # OpenCode setups in profiles/opencode/
 lab use <profile>              # add the `lab` provider and the rating plugin to OpenCode
 opencode
 ```
@@ -122,6 +124,7 @@ If you add your own entry, check that its `gpu` has enough memory for the weight
 ```sh
 opencode                         # the active profile's model is the default
 lab use <profile>                # switch the default model (restart OpenCode afterwards)
+lab harness gemini               # switch to Gemini CLI (`lab harness opencode` switches back), then run `gemini`
 lab warm <model>                 # optional: start a container before you begin, to skip the cold start
 lab warm <model> --for 2h        # keep one running for a long session (shows the cost and asks first)
 lab metrics --since 24h          # tokens, response times and ratings per model
@@ -136,11 +139,11 @@ lab show <id>                    # …and read one, with the numbers for every s
   - **Client:** prompts and agent steps, time per prompt, and the network and queueing overhead between OpenCode and the GPU.
   - **Ratings:** the average and the 4/3/2/1 counts.
 
-  Narrow it with `--since 7d` or `--model <name>`, or add `--json` to process the numbers yourself.
+  Narrow it with `--since 7d` or `--model <name>`, or add `--json` to process the numbers yourself. It covers the active harness; `--harness all` shows OpenCode and Gemini CLI one after the other.
 - **`lab prompts`** lists individual prompts with their numbers. Filter by `--rating 1,2` (or `skip`, `none`) and sort by `--sort tokens` or `--sort duration` to find the expensive, slow or bad ones.
 - **`lab show <id>`** replays one prompt: the conversation, tool calls and edits, with the tokens and times of each model request and your rating. It takes a short ID from `lab prompts`, an OpenCode session id or a server `request_id`. It also prints the command to reopen that session in OpenCode.
 
-The `metrics`, `prompts` and `show` commands download new server log lines first. Add `--offline` to skip that.
+The `metrics`, `prompts` and `show` commands download new server log lines first. Add `--offline` to skip that. `lab show` finds a prompt in any harness.
 
 ## Ratings
 
@@ -155,6 +158,41 @@ With `feedback = true` in the active profile, OpenCode asks after each finished 
 
 Use the arrow keys or type the digit, then press Enter. Esc skips the rating, which is recorded as skipped. `/feedback` in OpenCode turns ratings off or on for that window. Ratings aren't requested for subagent sessions, for prompts that errored or were interrupted, or for models outside `lab/`.
 
+Gemini CLI has no way for a plugin to draw inside its window, so ratings work differently there: see [Gemini CLI](#gemini-cli).
+
+## Gemini CLI
+
+openrate also works as the logging and rating layer for Gemini CLI. Gemini CLI talks to Google's API directly, so nothing of ours sits in between and no Modal GPU is involved. Everything comes from Gemini CLI's own records.
+
+### Setting it up
+
+```sh
+npm install -g @google/gemini-cli@0.61.0   # the version openrate was built against
+export GEMINI_API_KEY=...                  # from aistudio.google.com/apikey; put it in your shell profile
+lab harness gemini                         # writes Gemini CLI's settings for the active Gemini profile
+gemini                                     # use it as usual
+```
+
+`lab harness gemini` makes Gemini CLI the active harness and writes its profile (`profiles/gemini/`) into `~/.gemini/settings.json`. OpenCode stays set up and logged, and `lab harness opencode` switches back. `lab use <profile>` and `lab profiles` work on the active harness, so `lab use pro` picks the Gemini profile `pro` while Gemini CLI is active.
+
+Use an API key rather than "Login with Google" for benchmarking: Google login has quotas and can quietly switch to a smaller model. The first time you run `gemini` in a folder, it asks whether to trust the folder.
+
+### What it records
+
+| | |
+|---|---|
+| **Recorded** | For every model call: tokens in, cached, out and thinking; how long the call took; the model that actually answered; and what it was for (the answer, a subagent, or one of Gemini CLI's own side calls, such as routing or loop checks). The conversation, from Gemini CLI's chat files. |
+| **Not recorded** | Time to first token and tokens per second. Times are measured on your machine, so they include the network. There is no server side to compare with. |
+
+`lab metrics` shows calls, tokens, call and prompt times, side calls and ratings for each Gemini model. `lab prompts` and `lab show` work as they do for OpenCode, and `lab show` prints the command to reopen the session (`gemini --resume <session id>`).
+
+### Ratings in Gemini CLI
+
+- **`/rate 1` to `/rate 4`** rates the last answer, anywhere Gemini CLI runs. It's saved without reaching the model. Gemini CLI shows the confirmation as "Agent execution blocked: openrate saved your rating…", and that wording can't be changed.
+- **A pop-up after each answer**, with `feedback = true` in the profile, asks for 1–4. Skip, Esc or closing it records a skip. It runs in the background, so Gemini CLI doesn't wait for it. It needs a screen: it doesn't appear over SSH or on a machine without a display. A newer answer replaces an unanswered pop-up.
+
+Rating twice keeps the later one.
+
 ## Commands
 
 | Command | What it does |
@@ -165,10 +203,11 @@ Use the arrow keys or type the digit, then press Enter. Esc skips the rating, wh
 | `lab deploy <name> \| --all` | Deploy or redeploy, reapply the scaling in `models.toml`, update OpenCode |
 | `lab stop <name>` | Stop the app (the weights stay in the volume) |
 | `lab warm <name> [--for 2h \| --off]` | Start a container now, or keep one up for a while |
-| `lab use <profile>` · `lab profiles` · `lab sync` | Switch, list or reapply OpenCode profiles |
-| `lab metrics [--since 7d] [--model M] [--json]` | Summary per model |
-| `lab prompts [--since 7d] [--rating 1,2] [--sort tokens\|duration] [-n 20]` | List prompts with their numbers |
-| `lab show <id> [--full]` | One prompt's conversation and numbers |
+| `lab harness [opencode \| gemini]` | Show the harnesses, or switch to one (it stays set up when you switch away) |
+| `lab use <profile>` · `lab profiles` · `lab sync` | Choose, list or reapply the active harness's profile |
+| `lab metrics [--since 7d] [--model M] [--harness H\|all] [--json]` | Summary per model |
+| `lab prompts [--since 7d] [--rating 1,2] [--sort tokens\|duration] [-n 20] [--harness H\|all]` | List prompts with their numbers |
+| `lab show <id> [--full]` | One prompt's conversation and numbers, from any harness |
 | `lab logs <name> [-f]` | The model app's Modal logs (vLLM output, errors) |
 
 ## Models: `models.toml`
@@ -213,9 +252,11 @@ gpus    = 2                              # same weights, split across two GPUs
 
 Every profile lists all deployed models, so the new model appears in OpenCode's `/models` list after `lab deploy`. A profile only chooses which model is the default.
 
-## Profiles: `profiles/*.toml`
+## Profiles: `profiles/<harness>/*.toml`
 
-A profile is one version of the OpenCode setup. `lab use <profile>` writes it to `build/opencode.json` and merges it into `~/.config/opencode/opencode.json`. Restart OpenCode after switching.
+A profile is one version of a harness's setup. `lab use <profile>` applies a profile of the active harness, and each harness remembers its own (`lab harness` shows them). Restart the harness after switching.
+
+An OpenCode profile (`profiles/opencode/`) is written to `build/opencode.json` and merged into `~/.config/opencode/opencode.json`:
 
 ```toml
 model    = "lab/<name>"          # OpenCode's default model
@@ -226,6 +267,16 @@ feedback = true                  # ask for a 1–4 rating after each prompt
 ```
 
 If a profile's default model isn't deployed, OpenCode's default model is left unchanged and you get a warning.
+
+A Gemini CLI profile (`profiles/gemini/`) is merged into `~/.gemini/settings.json`:
+
+```toml
+model    = "gemini-3.1-pro-preview"   # pinned; "auto" would let Gemini CLI pick Pro or Flash for each prompt
+feedback = true                       # rating pop-up after each answer; `/rate` always works
+# auth   = "api-key"                  # or "google-login"
+# [gemini]                            # copied as-is into Gemini CLI's settings
+# model.compressionThreshold = 0.5
+```
 
 ## MCP servers
 
@@ -248,8 +299,10 @@ MCP servers change the measurements:
 
 - **`~/.config/opencode/opencode.json`:** adds the `lab` provider and the keys the active profile sets. Everything else in the file is left alone.
 - **`~/.config/opencode/tui.json`:** adds the rating plugin (`plugins/feedback.ts`).
+- **`~/.gemini/settings.json`** (once you use Gemini CLI): sets `model.name`, `security.auth.selectedType`, local telemetry (`telemetry.*`, written to `metrics/gemini/`), turns off usage statistics sent to Google (`privacy.usageStatisticsEnabled`), and adds two hooks named `openrate-rate` and `openrate-popup`. Other settings and hooks are left alone.
+- **`~/.gemini/commands/rate.toml`:** the `/rate` command. If you already have your own `rate.toml`, `lab` stops rather than replace it.
 - **Backups:** before every write, the previous version of each file is copied to `.lab/backups/`.
-- **Comments in your config:** if either file contains comments (JSONC), `lab` refuses to merge rather than risk losing them. Remove the comments or move them elsewhere.
+- **Comments in your config:** if a config file contains comments (JSONC), `lab` refuses to merge rather than risk losing them. Remove the comments or move them elsewhere.
 
 On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, the secret `lab-api-key`, and a workspace proxy token. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, delete the token (`modal workspace proxy-tokens list`, then `delete <id>`), and remove the `lab` provider and the plugin entry from the two OpenCode files.
 
@@ -259,9 +312,13 @@ On Modal, openrate creates one app per deployed model (`lab-<name>`), the volume
 |---|---|---|
 | Full conversations: prompts, replies, tool calls, edits, per-step tokens and times | `~/.local/share/opencode/opencode.db` | OpenCode itself (`lab` only reads it) |
 | One line per model request: tokens (prompt, cached, output), time to first token, total time, tok/s, requests running at once, session id | Modal volume `lab-metrics`, downloaded to `metrics/server/` | The proxy in front of vLLM |
-| One line per rated prompt | `metrics/feedback.jsonl` | The rating plugin (`plugins/feedback.ts`) |
+| One line per rated prompt | `metrics/feedback.jsonl` | The rating plugin (`plugins/feedback.ts`); for Gemini CLI, `/rate` and the pop-up |
+| Gemini CLI: one line per model call (tokens, duration, model, role, session) | `metrics/gemini/calls.jsonl` | `lab`, from Gemini CLI's telemetry in `metrics/gemini/telemetry.log` |
+| Gemini CLI: full conversations | `~/.gemini/tmp/<project>/chats/` | Gemini CLI itself (`lab` only reads it) |
 
-The three sources are linked by ids. A rating carries the prompt's message id, and OpenCode sends its session id with every request, which the proxy records. All collected data stays in your Modal workspace and on your machine.
+Gemini CLI's telemetry repeats the whole system prompt and tool list with every call, about 100 KB each. `lab` copies the fields it uses into `calls.jsonl` and empties `telemetry.log` once no Gemini CLI is running.
+
+The OpenCode sources are linked by ids. A rating carries the prompt's message id, and OpenCode sends its session id with every request, which the proxy records. All collected data stays in your Modal workspace and on your machine.
 
 ## Costs and timing
 
@@ -279,16 +336,23 @@ The three sources are linked by ids. A rating carries the prompt's message id, a
 - **vLLM fails with an import error:** vLLM and `transformers` are pinned together in `serving/vllm_server.py`. If you change one, change the other to a compatible version.
 - **A model is missing from OpenCode's `/models` list:** run `lab sync` and restart OpenCode. The picker moves recently used models into a "Recent" group, so search by name to see every model.
 - **The rating dialog doesn't appear:** check that the active profile has `feedback = true`, run `lab use <profile>` and restart OpenCode.
+- **Gemini CLI's rating pop-up doesn't appear:** it needs a screen (not SSH) and `feedback = true` in the Gemini profile. Run `lab use <profile>` with Gemini CLI active, then restart `gemini`. `/rate 1-4` works without it.
+- **`/rate` says there's nothing to rate:** it rates the last answer in the current session, so ask something first.
+- **`lab use <name>` says there's no such profile:** profiles belong to a harness. `lab harness` shows which one is active.
 
 ## Repo layout
 
 ```
 models.toml            what can be served
-profiles/              OpenCode setups (`lab use <name>`)
+profiles/opencode/     OpenCode setups (`lab use <name>`)
+profiles/gemini/       Gemini CLI setups
 lab/                   the `lab` command
   cli.py               subcommands
   registry.py          load and validate models.toml
-  profiles.py          render profiles, merge into the global OpenCode config
+  profiles.py          load profiles, merge OpenCode ones into the global OpenCode config
+  gemini.py            Gemini CLI: write its settings, read its telemetry and chat files
+  gemini_hook.py       Gemini CLI hooks: `/rate` and the pop-up
+  rate_popup.py        the rating pop-up (tkinter)
   cloud.py             Modal calls, GPU prices, .lab/state.json
   traces.py            read and join OpenCode's database, server lines and ratings
   metrics.py           `lab metrics` summary
