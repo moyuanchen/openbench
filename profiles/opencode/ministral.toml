@@ -1,4 +1,4 @@
-# OpenCode profile "ministral". `lab use ministral` writes it to build/opencode.json and into
+# OpenCode profile "ministral". With OpenCode active (`lab harness opencode`), `lab use ministral` writes it to build/opencode.json and into
 # ~/.config/opencode/opencode.json (only the `lab` provider and the keys set here).
 
 model    = "lab/ministral-14b"           # OpenCode's default model (models.toml: ministral-14b)

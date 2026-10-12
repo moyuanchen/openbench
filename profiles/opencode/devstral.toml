@@ -1,4 +1,4 @@
-# OpenCode profile "devstral". `lab use devstral` writes it to build/opencode.json and into
+# OpenCode profile "devstral". With OpenCode active (`lab harness opencode`), `lab use devstral` writes it to build/opencode.json and into
 # ~/.config/opencode/opencode.json (only the `lab` provider and the keys set here).
 
 model    = "lab/devstral-small-2"        # OpenCode's default model (models.toml: devstral-small-2)

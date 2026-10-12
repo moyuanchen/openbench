@@ -1,4 +1,8 @@
-"""Profiles: versions of the OpenCode setup. Rendered to build/opencode.json, then copied into the global config."""
+"""Profiles: versions of each harness's setup, in profiles/<harness>/<name>.toml.
+
+OpenCode profiles are rendered to build/opencode.json, then copied into the global config (this module).
+Gemini CLI profiles are written into ~/.gemini/settings.json (lab/gemini.py).
+"""
 
 import json
 import shutil
@@ -20,21 +24,27 @@ FEEDBACK_PLUGIN = REPO / "plugins" / "feedback.ts"
 FEEDBACK_LOG = REPO / "metrics" / "feedback.jsonl"
 
 PROVIDER_ID = "lab"  # not "modal": models.dev already has a `modal` provider, and OpenCode merges the two
-PROFILE_KEYS = {"model", "models", "feedback", "feedback_models", "opencode"}
+HARNESSES = {"opencode": "OpenCode", "gemini": "Gemini CLI"}  # id -> name; the id is also the command to run
+PROFILE_KEYS = {
+    "opencode": {"model", "models", "feedback", "feedback_models", "opencode"},
+    "gemini": {"model", "feedback", "auth", "gemini"},
+}
 
 
-def names() -> list[str]:
-    return sorted(p.stem for p in PROFILES_DIR.glob("*.toml"))
+def names(harness: str) -> list[str]:
+    return sorted(p.stem for p in (PROFILES_DIR / harness).glob("*.toml"))
 
 
-def load(name: str) -> dict:
-    path = PROFILES_DIR / f"{name}.toml"
+def load(harness: str, name: str) -> dict:
+    path = PROFILES_DIR / harness / f"{name}.toml"
     if not path.exists():
-        raise FileNotFoundError(f"no profile {name!r} (have: {', '.join(names()) or 'none'})")
+        others = [h for h in HARNESSES if h != harness and (PROFILES_DIR / h / f"{name}.toml").exists()]
+        hint = f"; it's in profiles/{others[0]}/: `lab harness {others[0]}` switches" if others else ""
+        raise FileNotFoundError(f"no {harness} profile {name!r} (have: {', '.join(names(harness)) or 'none'}){hint}")
     profile = tomllib.loads(path.read_text())
-    unknown = set(profile) - PROFILE_KEYS
+    unknown = set(profile) - PROFILE_KEYS[harness]
     if unknown:
-        raise ValueError(f"profiles/{name}.toml: unknown key(s) {sorted(unknown)}")
+        raise ValueError(f"profiles/{harness}/{name}.toml: unknown key(s) {sorted(unknown)}")
     return profile
 
 
