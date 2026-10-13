@@ -2,14 +2,15 @@
 
 Gemini CLI talks to Google's API directly; nothing of ours sits in between. Everything comes from its own files:
 
-settings   ~/.gemini/settings.json: `lab use` sets the model, local telemetry, usage statistics off, and two hooks
-           (lab/gemini_hook.py) for ratings, plus the `/rate` command in ~/.gemini/commands/rate.toml.
+settings   ~/.gemini/settings.json: `lab use` sets the model, local telemetry, usage statistics off, and three hooks
+           (lab/gemini_hook.py) for ratings and chat copies, plus the `/rate` command in ~/.gemini/commands/rate.toml.
 telemetry  Gemini CLI appends one entry per model call to metrics/gemini/telemetry.log: tokens, duration, model,
            session, prompt id and role (main answer, subagent, or a utility call such as routing or loop checks).
            Each call also writes the whole system prompt and tool list (~100 KB), so `extract()` copies the fields
            we use into metrics/gemini/calls.jsonl and empties the raw file when no Gemini CLI process has it open.
 chats      ~/.gemini/tmp/<project>/chats/session-*.jsonl: the conversation, replayed the way Gemini CLI does
-           (packages/core/src/services/chatRecordingService.ts).
+           (packages/core/src/services/chatRecordingService.ts). The hooks copy it to metrics/gemini/chats/<project>/
+           after each answer and at session end, and lab reads that copy once Gemini CLI deletes its own (30 days).
 ratings    metrics/feedback.jsonl lines with "harness": "gemini", from `/rate` and the pop-up.
 
 A call belongs to the latest prompt of its session that started before it. Time to first token isn't recorded.
@@ -27,7 +28,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from lab import traces
+from lab import gemini_hook, traces
 from lab.registry import REPO
 
 GEMINI_DIR = Path.home() / ".gemini"
@@ -35,11 +36,12 @@ SETTINGS_FILE = GEMINI_DIR / "settings.json"
 RATE_COMMAND = GEMINI_DIR / "commands" / "rate.toml"
 DATA_DIR = REPO / "metrics" / "gemini"
 TELEMETRY_FILE = DATA_DIR / "telemetry.log"
+CHATS_DIR = gemini_hook.CHATS_DIR
 CALLS_FILE = DATA_DIR / "calls.jsonl"
 OFFSET_FILE = DATA_DIR / "telemetry.offset"
 HOOK = REPO / "lab" / "gemini_hook.py"
 BACKUP_DIR = REPO / ".lab" / "backups"
-HOOK_NAMES = {"openrate-rate", "openrate-popup"}
+HOOK_NAMES = {"openrate-rate", "openrate-after", "openrate-end", "openrate-popup"}  # openrate-popup: an older name
 AUTH_TYPES = {"api-key": "gemini-api-key", "google-login": "oauth-personal"}
 COMMAND_MARKER = "# Written by openrate"
 SIDE = "utility"  # roles starting with this are Gemini CLI's own background calls, not the answer
@@ -88,8 +90,9 @@ def apply(name: str, profile: dict, previously_managed: list[str]) -> tuple[Path
         _set(current, path, value)
     hooks = current.setdefault("hooks", {})
     _install_hook(hooks, "BeforeAgent", "openrate-rate", _hook_command("before", name))
-    _install_hook(hooks, "AfterAgent", "openrate-popup",
-                  _hook_command("after", name) if profile.get("feedback") else None)
+    _install_hook(hooks, "AfterAgent", "openrate-after",
+                  _hook_command("after", name, *(["--popup"] if profile.get("feedback") else [])))
+    _install_hook(hooks, "SessionEnd", "openrate-end", _hook_command("end", name))
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -97,23 +100,20 @@ def apply(name: str, profile: dict, previously_managed: list[str]) -> tuple[Path
     return backup, list(extra)
 
 
-def _hook_command(event: str, profile: str) -> str:
+def _hook_command(event: str, profile: str, *flags: str) -> str:
     # The venv's Python, by path: `lab` runs from it, and it has tkinter for the pop-up.
-    return " ".join(shlex.quote(part) for part in (sys.executable, "-I", str(HOOK), event, "--profile", profile))
+    command = (sys.executable, "-I", str(HOOK), event, "--profile", profile, *flags)
+    return " ".join(shlex.quote(part) for part in command)
 
 
-def _install_hook(hooks: dict, event: str, name: str, command: str | None) -> None:
+def _install_hook(hooks: dict, event: str, name: str, command: str) -> None:
     definitions = []
     for definition in hooks.get(event, []):
         kept = [h for h in definition.get("hooks", []) if h.get("name") not in HOOK_NAMES]
         if kept:
             definitions.append({**definition, "hooks": kept})
-    if command:
-        definitions.append({"hooks": [{"type": "command", "name": name, "command": command, "timeout": 10000}]})
-    if definitions:
-        hooks[event] = definitions
-    else:
-        hooks.pop(event, None)
+    definitions.append({"hooks": [{"type": "command", "name": name, "command": command, "timeout": 10000}]})
+    hooks[event] = definitions
 
 
 def _write_rate_command() -> None:
@@ -157,7 +157,10 @@ def _unset(config: dict, path: str) -> None:
 # --- telemetry -> calls.jsonl ---
 
 def extract() -> None:
-    """Copy new telemetry entries into calls.jsonl; empty the raw file once nothing has it open."""
+    """Copy new telemetry entries into calls.jsonl; empty the raw file once nothing has it open.
+
+    Also brings the chat copies of those entries' sessions up to date, in case a hook didn't run (Gemini CLI killed).
+    """
     if not TELEMETRY_FILE.exists():
         return
     with _lock():
@@ -178,6 +181,12 @@ def extract() -> None:
             TELEMETRY_FILE.open("w").close()
             offset = 0
         OFFSET_FILE.write_text(json.dumps({"inode": stat.st_ino, "offset": offset}))
+    for session_id in {c["session_id"] for c in compact if c.get("session_id")}:
+        for path in _originals(session_id):
+            try:
+                gemini_hook.archive(str(path), session_id)
+            except OSError as exc:
+                print(f"warning: could not copy {path} into {gemini_hook.CHATS_DIR}: {exc}", file=sys.stderr)
 
 
 def _parse(data: bytes) -> tuple[list[dict], int]:
@@ -356,16 +365,16 @@ def ratings() -> list[dict]:
 
 
 def _chat(session_id: str) -> dict:
-    """The session's chat file replayed: user turns with their model replies, plus summary and directory."""
-    files = sorted(GEMINI_DIR.glob(f"tmp/*/chats/**/session-*-{(session_id or '')[:8]}.jsonl"))
-    for path in files:
+    """The session's chat file replayed: user turns with their model replies, plus summary and directory.
+
+    Gemini CLI's own file while it has one, otherwise openrate's copy.
+    """
+    candidates = [(path, path.parent.parent / ".project_root") for path in _originals(session_id)]
+    candidates += [(path, path.parent / ".project_root") for path in _copies(session_id)]
+    for path, root in candidates:
         metadata, messages = _replay(path)
         if metadata.get("sessionId") != session_id:
             continue
-        project = path.parent
-        while project.name != "chats":
-            project = project.parent
-        root = project.parent / ".project_root"
         turns = []
         for message in messages:
             if message.get("type") == "user" and _user_text(message):
@@ -376,6 +385,20 @@ def _chat(session_id: str) -> dict:
         return {"turns": turns, "summary": metadata.get("summary"),
                 "directory": root.read_text().strip() if root.exists() else ""}
     return {}
+
+
+def _originals(session_id: str) -> list[Path]:
+    """Gemini CLI's chat files that may be this session's (the name has only the first 8 characters of the id)."""
+    return sorted(GEMINI_DIR.glob(f"tmp/*/chats/{_chat_name(session_id)}"))
+
+
+def _copies(session_id: str) -> list[Path]:
+    """openrate's copies of them, in metrics/gemini/chats/<project>/."""
+    return sorted(CHATS_DIR.glob(f"*/{_chat_name(session_id)}"))
+
+
+def _chat_name(session_id: str) -> str:
+    return f"session-*-{(session_id or '')[:8]}.jsonl"
 
 
 def _replay(path: Path) -> tuple[dict, list[dict]]:
