@@ -348,6 +348,7 @@ def _apply(state: dict, harness: str, name: str) -> None:
           + (f" (backup: {backup.relative_to(REPO)})" if backup else "") + f" and {gemini.RATE_COMMAND}")
     print(f"Ratings: `/rate 1-4` in Gemini CLI; pop-up after each answer {'on' if profile.get('feedback') else 'off'}"
           " (profile key `feedback`)")
+    print(f"Chats: copied to {gemini.CHATS_DIR.relative_to(REPO)}/ after each answer and when a session ends")
     if profile.get("auth", "api-key") == "api-key" and not os.environ.get("GEMINI_API_KEY"):
         print("warning: GEMINI_API_KEY isn't set in this shell; add it to your shell profile (Google AI Studio key)")
     if not shutil.which("gemini"):
@@ -377,6 +378,8 @@ def _resync(state: dict, required: bool = False) -> None:
     listed = ", ".join(f"lab/{m}" for m in config["provider"]["lab"]["models"]) or "no models (nothing deployed)"
     print(f"OpenCode profile {name!r}: {listed}. Wrote {profiles.BUILD_FILE.relative_to(REPO)} and "
           f"{profiles.GLOBAL_CONFIG}" + (f" (backup: {backup.relative_to(REPO)})" if backup else ""))
+    print(f"Chats: every session is copied to {profiles.CHATS_DIR.relative_to(REPO)}/ after each answer "
+          f"(plugin {profiles.ARCHIVE_PLUGIN.relative_to(REPO)})")
     tui_backup = profiles.apply_tui(name, profile)
     print(f"Rating prompts: {'on' if profile.get('feedback') else 'off'} by default (toggle in OpenCode with /feedback); "
           f"plugin set in {profiles.GLOBAL_TUI_CONFIG}" + (f" (backup: {tui_backup.relative_to(REPO)})" if tui_backup else ""))

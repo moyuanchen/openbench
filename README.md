@@ -4,7 +4,7 @@ Benchmark open-weight models by doing real work with them.
 
 openrate serves open-weight models on [Modal](https://modal.com) GPUs and connects them to [OpenCode](https://opencode.ai), the terminal coding agent. You code as usual. In the background, openrate records every token, every response time and your own rating of each answer, and links them all to the conversation they came from.
 
-It can also record and rate [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions, which run on Google's own API, so you can compare Gemini models with yours on the same kind of work. See [Gemini CLI](#gemini-cli).
+It can also record and rate [Gemini CLI](https://github.com/google-gemini/gemini-cli) sessions, which run on Google's own API, so you can benchmark Gemini models on the same kind of work. See [Gemini CLI](#gemini-cli).
 
 ## Why
 
@@ -181,7 +181,7 @@ Use an API key rather than "Login with Google" for benchmarking: Google login ha
 
 | | |
 |---|---|
-| **Recorded** | For every model call: tokens in, cached, out and thinking; how long the call took; the model that actually answered; and what it was for (the answer, a subagent, or one of Gemini CLI's own side calls, such as routing or loop checks). The conversation, from Gemini CLI's chat files. |
+| **Recorded** | For every model call: tokens in, cached, out and thinking; how long the call took; the model that actually answered; and what it was for (the answer, a subagent, or one of Gemini CLI's own side calls, such as routing or loop checks). The conversation, from Gemini CLI's chat files, which openrate copies into the repo. |
 | **Not recorded** | Time to first token and tokens per second. Times are measured on your machine, so they include the network. There is no server side to compare with. |
 
 `lab metrics` shows calls, tokens, call and prompt times, side calls and ratings for each Gemini model. `lab prompts` and `lab show` work as they do for OpenCode, and `lab show` prints the command to reopen the session (`gemini --resume <session id>`).
@@ -297,14 +297,14 @@ MCP servers change the measurements:
 
 ## What openrate changes on your machine
 
-- **`~/.config/opencode/opencode.json`:** adds the `lab` provider and the keys the active profile sets. Everything else in the file is left alone.
+- **`~/.config/opencode/opencode.json`:** adds the `lab` provider, the plugin that copies every session into the repo (`plugins/archive.ts`), and the keys the active profile sets. Everything else in the file, other plugins included, is left alone.
 - **`~/.config/opencode/tui.json`:** adds the rating plugin (`plugins/feedback.ts`).
-- **`~/.gemini/settings.json`** (once you use Gemini CLI): sets `model.name`, `security.auth.selectedType`, local telemetry (`telemetry.*`, written to `metrics/gemini/`), turns off usage statistics sent to Google (`privacy.usageStatisticsEnabled`), and adds two hooks named `openrate-rate` and `openrate-popup`. Other settings and hooks are left alone.
+- **`~/.gemini/settings.json`** (once you use Gemini CLI): sets `model.name`, `security.auth.selectedType`, local telemetry (`telemetry.*`, written to `metrics/gemini/`), turns off usage statistics sent to Google (`privacy.usageStatisticsEnabled`), and adds three hooks named `openrate-rate`, `openrate-after` and `openrate-end` (ratings and chat copies). Other settings and hooks are left alone.
 - **`~/.gemini/commands/rate.toml`:** the `/rate` command. If you already have your own `rate.toml`, `lab` stops rather than replace it.
 - **Backups:** before every write, the previous version of each file is copied to `.lab/backups/`.
 - **Comments in your config:** if a config file contains comments (JSONC), `lab` refuses to merge rather than risk losing them. Remove the comments or move them elsewhere.
 
-On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, the secret `lab-api-key`, and a workspace proxy token. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, delete the token (`modal workspace proxy-tokens list`, then `delete <id>`), and remove the `lab` provider and the plugin entry from the two OpenCode files.
+On Modal, openrate creates one app per deployed model (`lab-<name>`), the volumes `lab-hf-cache`, `lab-vllm-cache` and `lab-metrics`, the secret `lab-api-key`, and a workspace proxy token. To remove everything, `lab stop` each model, delete those volumes and the secret in the Modal dashboard, delete the token (`modal workspace proxy-tokens list`, then `delete <id>`), and remove the `lab` provider and the plugin entries from the two OpenCode files.
 
 ## Where the data is
 
@@ -314,7 +314,11 @@ On Modal, openrate creates one app per deployed model (`lab-<name>`), the volume
 | One line per model request: tokens (prompt, cached, output), time to first token, total time, tok/s, requests running at once, session id | Modal volume `lab-metrics`, downloaded to `metrics/server/` | The proxy in front of vLLM |
 | One line per rated prompt | `metrics/feedback.jsonl` | The rating plugin (`plugins/feedback.ts`); for Gemini CLI, `/rate` and the pop-up |
 | Gemini CLI: one line per model call (tokens, duration, model, role, session) | `metrics/gemini/calls.jsonl` | `lab`, from Gemini CLI's telemetry in `metrics/gemini/telemetry.log` |
+| OpenCode: a copy of every session, saved again after each answer | `metrics/opencode/chats/<session id>.json` | The plugin `plugins/archive.ts` |
 | Gemini CLI: full conversations | `~/.gemini/tmp/<project>/chats/` | Gemini CLI itself (`lab` only reads it) |
+| Gemini CLI: a copy of every conversation | `metrics/gemini/chats/<project>/` | openrate's hooks, after each answer and when a session ends |
+
+Both harnesses' conversations are copied into the repo, every session, whatever the model. An OpenCode copy has the format of `opencode export`, so `opencode import <file>` brings a deleted session back. A Gemini CLI copy is the chat file itself. Gemini CLI deletes its own chat files after 30 days, and `lab show` then reads the copy. If Gemini CLI is killed before its hooks run, the next `lab metrics`, `lab prompts` or `lab show` catches up.
 
 Gemini CLI's telemetry repeats the whole system prompt and tool list with every call, about 100 KB each. `lab` copies the fields it uses into `calls.jsonl` and empties `telemetry.log` once no Gemini CLI is running.
 
@@ -338,6 +342,7 @@ The OpenCode sources are linked by ids. A rating carries the prompt's message id
 - **The rating dialog doesn't appear:** check that the active profile has `feedback = true`, run `lab use <profile>` and restart OpenCode.
 - **Gemini CLI's rating pop-up doesn't appear:** it needs a screen (not SSH) and `feedback = true` in the Gemini profile. Run `lab use <profile>` with Gemini CLI active, then restart `gemini`. `/rate 1-4` works without it.
 - **`/rate` says there's nothing to rate:** it rates the last answer in the current session, so ask something first.
+- **No session copies in `metrics/opencode/chats/` or `metrics/gemini/chats/`:** after updating openrate, switch to each harness once with `lab harness <name>` (that rewrites its config), switch back, and restart them. OpenCode logs a failed copy under the service `lab.archive`.
 - **`lab use <name>` says there's no such profile:** profiles belong to a harness. `lab harness` shows which one is active.
 
 ## Repo layout
@@ -351,7 +356,7 @@ lab/                   the `lab` command
   registry.py          load and validate models.toml
   profiles.py          load profiles, merge OpenCode ones into the global OpenCode config
   gemini.py            Gemini CLI: write its settings, read its telemetry and chat files
-  gemini_hook.py       Gemini CLI hooks: `/rate` and the pop-up
+  gemini_hook.py       Gemini CLI hooks: `/rate`, the pop-up and chat copies
   rate_popup.py        the rating pop-up (tkinter)
   cloud.py             Modal calls, GPU prices, .lab/state.json
   traces.py            read and join OpenCode's database, server lines and ratings
@@ -363,6 +368,7 @@ serving/               runs on Modal
   metrics.py           the per-request log writer
   ollama_server.py     Ollama backend (experimental, not tested on a GPU)
 plugins/feedback.ts    OpenCode plugin for the 1–4 rating
+plugins/archive.ts     OpenCode plugin that copies every session into metrics/opencode/chats/
 build/opencode.json    generated from the active profile (gitignored: your endpoint URLs)
 .secrets/ .lab/ metrics/   gitignored: API key and proxy token, local state, collected data
 ```

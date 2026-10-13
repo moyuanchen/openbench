@@ -22,6 +22,8 @@ GLOBAL_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 GLOBAL_TUI_CONFIG = Path.home() / ".config" / "opencode" / "tui.json"
 FEEDBACK_PLUGIN = REPO / "plugins" / "feedback.ts"
 FEEDBACK_LOG = REPO / "metrics" / "feedback.jsonl"
+ARCHIVE_PLUGIN = REPO / "plugins" / "archive.ts"
+CHATS_DIR = REPO / "metrics" / "opencode" / "chats"  # one JSON file per session, written by plugins/archive.ts
 
 PROVIDER_ID = "lab"  # not "modal": models.dev already has a `modal` provider, and OpenCode merges the two
 HARNESSES = {"opencode": "OpenCode", "gemini": "Gemini CLI"}  # id -> name; the id is also the command to run
@@ -104,10 +106,10 @@ def write_build(config: dict) -> None:
 
 
 def apply_global(config: dict, previously_managed: list[str]) -> tuple[Path | None, list[str]]:
-    """Copy the `lab` provider and this profile's top-level keys into the global OpenCode config.
+    """Copy the `lab` provider, the session-copying plugin and this profile's top-level keys into the global config.
 
-    Everything else in that file is left alone. Keys a previous profile set but this one doesn't are removed.
-    Returns the backup path and the keys now managed by lab.
+    Everything else in that file, other plugins included, is left alone. Keys a previous profile set but this one
+    doesn't are removed. Returns the backup path and the keys now managed by lab.
     """
     if GLOBAL_CONFIG.exists():
         try:
@@ -127,6 +129,9 @@ def apply_global(config: dict, previously_managed: list[str]) -> tuple[Path | No
     current.setdefault("provider", {})[PROVIDER_ID] = config["provider"][PROVIDER_ID]
     for key in managed:
         current[key] = config[key]
+    ours = str(ARCHIVE_PLUGIN)
+    plugins = [p for p in current.get("plugin", []) if (p[0] if isinstance(p, list) else p) != ours]
+    current["plugin"] = plugins + [[ours, {"dir": str(CHATS_DIR)}]]
 
     GLOBAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     GLOBAL_CONFIG.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n")
