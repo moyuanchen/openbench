@@ -74,6 +74,13 @@ uv sync                        # creates .venv with Python 3.12, Modal's client 
 source .venv/bin/activate      # puts `lab` and `modal` on your PATH (or prefix commands with `uv run`)
 ```
 
+To install without uv, run the following in repo root
+```sh
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
 ### 4. Connect to Modal
 
 ```sh
